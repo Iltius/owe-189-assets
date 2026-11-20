@@ -1,78 +1,282 @@
---- wallpaper.lua.orig	2026-11-20 17:47:05.589241330 -0300
-+++ wallpaper.lua	2026-11-20 17:55:16.716208520 -0300
-@@ -202,10 +202,151 @@
-     end
- end
- 
-+-- Wallpaper Engine stores one copy of every language-dependent property and
-+-- gates each copy with a `condition` on the scene's own language selector
-+-- (`language.value == 4`). waywallen does not evaluate that field, so a
-+-- multi-language scene lists every variant at once: Vietnamese labels next to
-+-- Chinese combo options inside a Spanish UI
-+-- (waywallen/open-wallpaper-engine#189). Decode the language the host UI is in
-+-- and show only that variant, so the panel stays one readable list. A
-+-- condition this decoder cannot parse is left visible on purpose: hiding a
-+-- property the scene still uses would break the wallpaper.
-+local LANGUAGE_CODES = {
-+    ["english"] = "en", ["spanish"] = "es", ["espanol"] = "es", ["espanol"] = "es",
-+    ["french"] = "fr", ["francais"] = "fr", ["german"] = "de",
-+    ["deutsch"] = "de",
-+    ["italian"] = "it", ["italiano"] = "it", ["portuguese"] = "pt",
-+    ["brazilian"] = "pt-br", ["russian"] = "ru", ["russia"] = "ru",
-+    ["vietnamese"] = "vi", ["chinese"] = "zh", ["japanese"] = "ja",
-+    ["korean"] = "ko", ["ukrainian"] = "uk", ["polish"] = "pl",
-+    ["polski"] = "pl", ["turkish"] = "tr", ["dutch"] = "nl",
-+    ["nederlands"] = "nl", ["czech"] = "cs", ["swedish"] = "sv",
-+    ["svenska"] = "sv", ["hungarian"] = "hu", ["romanian"] = "ro",
-+    ["thai"] = "th", ["indonesian"] = "id", ["arabic"] = "ar",
+From 9626f32f0af92f164a755333aff15f6d12403dce Mon Sep 17 00:00:00 2001
+From: Iltius <Iltius@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 18:05:20 -0300
+Subject: [PATCH] plugin: filter the scene property list to the active language
+
+Workshop scenes ship one copy of each language-dependent property and gate
+every copy with a `condition` on the scene's own `language` selector. The
+condition never reaches the plugin, so the property editor lists every variant
+at once: Vietnamese labels next to Chinese combo options while the host UI is
+in Spanish.
+
+Pick the variant from the scene's selector and the locale the host UI is in,
+and mirror the selected value into the list; `apply` pins the same value as a
+default so the rendered wallpaper agrees with the labels.
+
+Conditions the plugin cannot decide stay visible: the list is rebuilt from the
+authored defaults, so hiding a property gated on a live panel value would make
+it unreachable once the user flips that value.
+
+Refs waywallen/open-wallpaper-engine#189
+---
+ tests/lua/scene_language_tests.lua            | 167 ++++++++++++++
+ .../wallpaper_engine/language.lua             | 214 ++++++++++++++++++
+ .../wallpaper_engine/wallpaper.lua            |   7 +
+ 3 files changed, 388 insertions(+)
+ create mode 100644 tests/lua/scene_language_tests.lua
+ create mode 100644 waywallen/plugins/org.waywallen.open-wallpaper-engine/wallpaper_engine/language.lua
+
+diff --git a/tests/lua/scene_language_tests.lua b/tests/lua/scene_language_tests.lua
+new file mode 100644
+index 0000000..0fc0dd6
+--- /dev/null
++++ b/tests/lua/scene_language_tests.lua
+@@ -0,0 +1,167 @@
++local source = assert(arg[1], "plugin directory required")
++
++function tr(value) return value end
++
++local modules = {}
++function import(name)
++    if not modules[name] then
++        local file = source .. "/" .. (name:gsub("%.", "/")) .. ".lua"
++        modules[name] = assert(loadfile(file))()
++    end
++    return modules[name]
++end
++
++local language = import("wallpaper_engine.language")
++
++local env = {}
++local settings = {}
++local project = { general = { properties = {} } }
++local project_exists = false
++ctx = {
++    env = function(name) return env[name] end,
++    config = { get = function(name) return settings[name] end },
++    fs = {
++        exists = function(path) return project_exists and path:find("project.json", 1, true) ~= nil end,
++        read = function(path) return "{}" end,
++    },
++    json = { parse = function() return project end },
 +}
 +
-+LANGUAGE_CODES["español"] = "es"
-+LANGUAGE_CODES["français"] = "fr"
-+LANGUAGE_CODES["русский"] = "ru"
-+LANGUAGE_CODES["tiếng việt"] = "vi"
-+LANGUAGE_CODES["中文"] = "zh"
-+LANGUAGE_CODES["日本語"] = "ja"
-+LANGUAGE_CODES["한국어"] = "ko"
-+LANGUAGE_CODES["українська"] = "uk"
-+LANGUAGE_CODES["čeština"] = "cs"
-+LANGUAGE_CODES["türkçe"] = "tr"
-+LANGUAGE_CODES["ไทย"] = "th"
++local ENTRY = { wp_type = "scene", resource = "/workshop/431960/1/scene.pkg" }
 +
-+local function host_language(ctx)
-+    for _, name in ipairs({ "LC_ALL", "LC_MESSAGES", "LANG" }) do
-+        local value = ctx.env(name)
-+        if value and value ~= "" and value ~= "C" and value ~= "POSIX" then
-+            local lang = split_posix_locale(value)
-+            if lang then return lang end
-+        end
-+    end
-+    return nil
++local function keys(props)
++    local out = {}
++    for key in pairs(props) do out[#out + 1] = key end
++    table.sort(out)
++    return table.concat(out, ",")
 +end
 +
-+-- The value of the scene's own language selector that matches the host UI, so
-+-- labels, combo options and the rendered wallpaper all agree.
-+local function preferred_language(props, ctx)
-+    local selector = props["language"]
-+    if type(selector) ~= "table" or selector.type ~= "combo" or
-+        type(selector.options) ~= "table" then
-+        return nil
-+    end
-+    local lang = host_language(ctx)
-+    if not lang then return nil end
-+    for _, option in ipairs(selector.options) do
-+        local label = string.lower(tostring(option.label or ""))
-+        local code = LANGUAGE_CODES[label]
-+        if not code then
-+            local base = string.match(label, "^([%a%s]+)%s*%(")
-+            code = base and LANGUAGE_CODES[base] or nil
-+        end
-+        if code == lang then return tostring(option.value) end
-+    end
-+    return nil
++-- The selector plus one variant per language, the shape workshop scenes ship.
++local function scene()
++    return {
++        language = { text = "Language", type = "combo", value = "1", options = {
++            { label = "English", value = "1" },
++            { label = "Spanish", value = "4" },
++            { label = "French", value = "5" },
++        } },
++        barcolor = { text = "Bar Color", type = "color", value = "1 1 1", condition = "language.value == 1" },
++        barcolor3 = { text = "Color de la barra", type = "color", value = "0.2 0.2 0.2", condition = "language.value == 4" },
++        barcolor4 = { text = "Couleur de la barre", type = "color", value = "0 0 0", condition = "language.value == 5" },
++        hdr = { text = "HDR", type = "bool", value = true, condition = "" },
++    }
 +end
 +
-+local function condition_literal(text)
++-- Spanish host: only the Spanish variant survives and the selector shows it.
++env = { LANG = "es_CL.UTF-8" }
++local props = scene()
++local filtered = language.filter(props, ctx)
++assert(keys(filtered) == "barcolor3,hdr,language", keys(filtered))
++assert(filtered.language.value == "4")
++assert(filtered.barcolor3.value == "0.2 0.2 0.2")
++assert(props.language.value == "1", "authored table must not be modified")
++assert(props.barcolor ~= nil, "authored table must not be modified")
++
++-- French host: the French variant is selected, not just the first one.
++env = { LANG = "fr_FR.UTF-8" }
++filtered = language.filter(scene(), ctx)
++assert(keys(filtered) == "barcolor4,hdr,language", keys(filtered))
++assert(filtered.language.value == "5")
++
++-- A locale the scene does not offer leaves the authored defaults alone.
++env = { LANG = "de_DE.UTF-8" }
++props = scene()
++assert(language.filter(props, ctx) == props)
++
++-- An explicit wallpaper_engine_locale wins over the environment.
++settings.wallpaper_engine_locale = "es-cl"
++env = { LANG = "en_US.UTF-8" }
++assert(language.filter(scene(), ctx).language.value == "4")
++settings.wallpaper_engine_locale = nil
++
++-- Labels are authored text: native spellings and suffixes both resolve.
++env = { LANG = "es_CL.UTF-8" }
++props = scene()
++props.language.options[2].label = "Spanish (Latin America)"
++assert(language.filter(props, ctx).language.value == "4")
++props = scene()
++props.language.options[2].label = "Español"
++assert(language.filter(props, ctx).language.value == "4")
++
++-- A plain label wins over a suffixed one offering the same language.
++props = scene()
++props.language.options[2].label = "Spanish (Latin America)"
++props.language.options[3] = { label = "Spanish", value = "7" }
++assert(language.filter(props, ctx).language.value == "7")
++
++-- Whitespace around the operator is optional.
++props = scene()
++props.barcolor3.condition = "language.value==4"
++assert(language.filter(props, ctx).barcolor3 ~= nil)
++
++-- Numeric option values compare against the literal in the condition.
++props = scene()
++props.language.options[2].value = 4
++filtered = language.filter(props, ctx)
++assert(filtered.language.value == 4)
++assert(filtered.barcolor3 ~= nil)
++
++-- Gates on properties the plugin does not pin stay visible: the list comes from
++-- authored defaults, so the panel cannot know the current value of a toggle.
++props = scene()
++props.coloring1 = { text = "Coloring", type = "combo", value = "1", options = {
++    { label = "Solid", value = "1" },
++    { label = "RGB", value = "3" },
++} }
++props.color1 = { text = "Color", type = "color", value = "1 1 1", condition = "coloring1.value == 3" }
++filtered = language.filter(props, ctx)
++assert(filtered.color1 ~= nil, "a condition on another property must stay visible")
++
++-- An undecidable clause keeps the whole condition undecidable.
++props = scene()
++props.extra = { text = "Extra", type = "bool", value = true, condition = "language.value == 4 && other.value == 1" }
++filtered = language.filter(props, ctx)
++assert(filtered.extra ~= nil, "a compound condition with an unknown property must stay visible")
++props = scene()
++props.extra = { text = "Extra", type = "bool", value = true, condition = "(language.value == 4)" }
++assert(language.filter(props, ctx).extra ~= nil, "parenthesised conditions are not decoded")
++
++-- Relational and inequality gates are decoded for the pinned language.
++props = scene()
++props.onlynotspanish = { text = "Not Spanish", type = "bool", value = true, condition = "language.value != 4" }
++assert(language.filter(props, ctx).onlynotspanish == nil)
++props = scene()
++props.fromfour = { text = "Four", type = "bool", value = true, condition = "language.value >= 4" }
++assert(language.filter(props, ctx).fromfour ~= nil)
++
++-- Scenes without a selector keep every property, even language-gated ones.
++props = { color = { text = "Color", type = "color", value = "1 1 1", condition = "language.value == 1" } }
++assert(language.filter(props, ctx) == props)
++
++-- Integration: properties() filters the list the daemon asks for.
++env = { LANG = "es_CL.UTF-8" }
++project = { general = { properties = scene() } }
++project_exists = true
++local wallpaper = import("wallpaper_engine.wallpaper")
++local wired = wallpaper.properties(ENTRY, ctx)
++assert(wired.barcolor3 ~= nil and wired.barcolor == nil)
++assert(wired.language.value == "4")
++assert(wired.hdr ~= nil)
++assert(wired["waywallen.enable_audio"] ~= nil)
++assert(wired["waywallen.playback_speed"] ~= nil)
++assert(wired["waywallen.mouse_parallax"] ~= nil)
++
++-- apply() pins the same value, so the rendered wallpaper matches the labels.
++env = { LANG = "es_CL.UTF-8" }
++local applied = wallpaper.apply(ENTRY, ctx)
++assert(applied.default_user_properties.language == "4")
++
++env = { LANG = "fr_FR.UTF-8" }
++applied = wallpaper.apply(ENTRY, ctx)
++assert(applied.default_user_properties.language == "5")
++
++env = { LANG = "de_DE.UTF-8" }
++applied = wallpaper.apply(ENTRY, ctx)
++assert(applied.default_user_properties.language == nil)
++assert(wallpaper.properties(ENTRY, ctx).language.value == "1")
++
++print("scene language tests passed")
+diff --git a/waywallen/plugins/org.waywallen.open-wallpaper-engine/wallpaper_engine/language.lua b/waywallen/plugins/org.waywallen.open-wallpaper-engine/wallpaper_engine/language.lua
+new file mode 100644
+index 0000000..a503812
+--- /dev/null
++++ b/waywallen/plugins/org.waywallen.open-wallpaper-engine/wallpaper_engine/language.lua
+@@ -0,0 +1,214 @@
++-- Wallpaper Engine stores one copy of every language-dependent scene property
++-- and gates each copy with a `condition` on the scene's language selector
++-- (`language.value == 4`). waywallen neither evaluates that condition nor
++-- applies the override before asking for the property list, so a multi-language
++-- scene lists every variant at once: Vietnamese labels next to Chinese combo
++-- options inside a Spanish UI.
++--
++-- The scene's own selector plus the locale the host UI is in are enough to pick
++-- the variant. A condition this module cannot decide is left visible on
++-- purpose: the list is rebuilt from the authored defaults, so hiding a property
++-- that another condition gates on a live panel value would make it unreachable
++-- once the user flips that value.
++
++local M = {}
++
++-- Primary language code to the names authors use in the selector. The label is
++-- authored text rather than a stable key, so English and native spellings are
++-- both listed; an unknown spelling keeps the authored default.
++local LANGUAGE_NAMES = {
++    ar = { "arabic", "العربية" },
++    bg = { "bulgarian", "български" },
++    cs = { "czech", "čeština" },
++    da = { "danish", "dansk" },
++    de = { "german", "deutsch" },
++    el = { "greek", "ελληνικά" },
++    en = { "english" },
++    es = { "spanish", "español", "espanol" },
++    fi = { "finnish", "suomi" },
++    fr = { "french", "français", "francais" },
++    he = { "hebrew", "עברית" },
++    hu = { "hungarian", "magyar" },
++    id = { "indonesian" },
++    it = { "italian", "italiano" },
++    ja = { "japanese", "日本語" },
++    ko = { "korean", "한국어" },
++    nb = { "norwegian", "norsk" },
++    nl = { "dutch", "nederlands" },
++    pl = { "polish", "polski" },
++    pt = { "portuguese", "português", "portugues" },
++    ro = { "romanian", "română" },
++    ru = { "russian", "russia", "русский" },
++    sk = { "slovak", "slovenčina" },
++    sv = { "swedish", "svenska" },
++    th = { "thai", "ไทย" },
++    tr = { "turkish", "türkçe" },
++    uk = { "ukrainian", "українська" },
++    vi = { "vietnamese", "tiếng việt" },
++    zh = { "chinese", "中文", "简体中文", "繁體中文" },
++}
++
++local LANGUAGE_CODES = {}
++for code, names in pairs(LANGUAGE_NAMES) do
++    for _, name in ipairs(names) do
++        LANGUAGE_CODES[name] = code
++    end
++end
++
++local function split(text, separator)
++    local parts = {}
++    local start = 1
++    while true do
++        local first, last = string.find(text, separator, start, true)
++        if not first then
++            parts[#parts + 1] = string.sub(text, start)
++            return parts
++        end
++        parts[#parts + 1] = string.sub(text, start, first - 1)
++        start = last + 1
++    end
++end
++
++local function literal(text)
 +    local quoted = string.match(text, '^"(.*)"$') or string.match(text, "^'(.*)'$")
 +    if quoted then return quoted end
 +    if text == "true" then return true end
@@ -80,89 +284,171 @@
 +    return tonumber(text) or text
 +end
 +
-+local function compare_values(left, operator, right)
-+    if left == nil then return false end
-+    if type(left) ~= type(right) then
-+        local left_number, right_number = tonumber(left), tonumber(right)
-+        if left_number and right_number then left, right = left_number, right_number end
-+    end
-+    if operator == "==" then return left == right end
-+    if operator == "~=" or operator == "!=" then return left ~= right end
++local function compare(left, operator, right)
 +    local left_number, right_number = tonumber(left), tonumber(right)
-+    if not left_number or not right_number then return false end
++    if operator == "==" or operator == "~=" or operator == "!=" then
++        local same
++        if left_number ~= nil and right_number ~= nil then
++            same = left_number == right_number
++        else
++            same = tostring(left) == tostring(right)
++        end
++        if operator == "==" then return same end
++        return not same
++    end
++    if left_number == nil or right_number == nil then return nil end
 +    if operator == ">" then return left_number > right_number end
 +    if operator == "<" then return left_number < right_number end
 +    if operator == ">=" then return left_number >= right_number end
-+    return left_number <= right_number
++    if operator == "<=" then return left_number <= right_number end
++    return nil
 +end
 +
-+-- True / false / nil, where nil means "cannot decide" and keeps the property
-+-- visible. Only a single `<key>.value <op> <literal>` clause is decoded:
-+-- Wallpaper Engine's own language gates use exactly that shape.
-+local function condition_holds(expression, values)
-+    if type(expression) ~= "string" then return nil end
-+    local clause = string.gsub(expression, "%s+", " ")
-+    clause = string.gsub(clause, "^ ", "")
-+    clause = string.gsub(clause, " $", "")
-+    if clause == "" then return nil end
-+    if string.find(clause, "&&", 1, true) or string.find(clause, "||", 1, true) or
-+        string.find(clause, "(", 1, true) then
-+        return nil
-+    end
-+    local name, operator, text = string.match(clause, "^(.-)%.value%s*([=~!<>]+)%s*(.-)$")
-+    if not name or name == "" then return nil end
++-- Decides one `property.value <operator> literal` clause, or nil when it is not
++-- a clause this plugin can answer: an unknown property, an undecoded operator,
++-- or a relational comparison against a non-number.
++local function clause_holds(clause, values)
++    local text = string.gsub(clause, "^%s+", "")
++    text = string.gsub(text, "%s+$", "")
++    local name, operator, right = string.match(text, "^(.-)%.value%s*([=~!<>]+)%s*(.-)$")
++    if not name or name == "" or values[name] == nil then return nil end
 +    if operator ~= "==" and operator ~= "~=" and operator ~= "!=" and
 +        operator ~= ">" and operator ~= "<" and operator ~= ">=" and
 +        operator ~= "<=" then
 +        return nil
 +    end
-+    return compare_values(values[name], operator, condition_literal(text))
++    return compare(values[name], operator, literal(right))
 +end
 +
-+local function apply_conditions(props, ctx)
-+    local language = preferred_language(props, ctx)
-+    if not language then return props end
-+    local values = { language = language }
++-- True / false / nil ("cannot decide"). `values` only carries the properties
++-- this module pins, so any clause about a live panel value stays undecidable by
++-- construction.
++local function condition_holds(expression, values)
++    if type(expression) ~= "string" then return nil end
++    local text = string.gsub(expression, "%s+", " ")
++    if text == "" then return nil end
++    if string.find(text, "(", 1, true) then return nil end
++    local unknown = false
++    for _, group in ipairs(split(text, "||")) do
++        local holds, decided = true, true
++        for _, clause in ipairs(split(group, "&&")) do
++            local verdict = clause_holds(clause, values)
++            if verdict == nil then
++                decided = false
++            elseif verdict == false then
++                holds = false
++            end
++        end
++        if decided and holds then return true end
++        if not decided then unknown = true end
++    end
++    if unknown then return nil end
++    return false
++end
++
++-- The primary language code the host UI is in. An explicit
++-- `wallpaper_engine_locale` setting wins; otherwise the daemon's environment
++-- decides, in POSIX precedence.
++local function ui_language_code(ctx)
++    local configured = ctx.config.get("wallpaper_engine_locale")
++    if type(configured) == "string" and configured ~= "" then
++        local code = string.match(string.lower(configured), "^(%a+)")
++        if code then return code end
++    end
++    for _, name in ipairs({ "LC_ALL", "LC_MESSAGES", "LANG" }) do
++        local value = ctx.env(name)
++        if type(value) == "string" and value ~= "" then
++            local code = string.match(value, "^(%a+)")
++            if code then
++                code = string.lower(code)
++                if code ~= "c" and code ~= "posix" then return code end
++            end
++        end
++    end
++    return nil
++end
++
++-- The value of the scene's own language selector that matches the host UI, or
++-- nil when the scene has no selector or offers no matching language; the
++-- authored default then stays untouched.
++function M.preferred_value(props, ctx)
++    local selector = props["language"]
++    if type(selector) ~= "table" or selector.type ~= "combo" or
++        type(selector.options) ~= "table" then
++        return nil
++    end
++    local code = ui_language_code(ctx)
++    if not code then return nil end
++    local fallback = nil
++    for _, option in ipairs(selector.options) do
++        if type(option) == "table" then
++            local label = string.lower(tostring(option.label or ""))
++            if LANGUAGE_CODES[label] == code then return option.value end
++            local base = string.match(label, "^(.-)%s*%(")
++            if fallback == nil and base and LANGUAGE_CODES[base] == code then
++                fallback = option.value
++            end
++        end
++    end
++    return fallback
++end
++
++-- Filters the variants gated on the selected language and mirrors the value the
++-- renderer will use into the kept entries, so the panel and the wallpaper
++-- agree. Returns a new table; `props` is never modified.
++function M.filter(props, ctx)
++    local value = M.preferred_value(props, ctx)
++    if value == nil then return props end
++    local values = { language = value }
 +    local kept = {}
 +    for key, property in pairs(props) do
-+        local visible = true
-+        local expression = type(property) == "table" and property.condition or nil
-+        -- Only the language gate is dropped: waywallen recomputes this list
-+        -- from authored defaults, so hiding a property that another condition
-+        -- gates on a live panel value would make it unreachable once the user
-+        -- flips that value.
-+        if type(expression) == "string" and
-+            string.find(expression, "language.value", 1, true) and
-+            condition_holds(expression, values) == false then
-+            visible = false
++        if type(property) ~= "table" or
++            condition_holds(property.condition, values) ~= false then
++            if type(property) == "table" and values[key] ~= nil then
++                local copy = {}
++                for field, field_value in pairs(property) do
++                    copy[field] = field_value
++                end
++                copy.value = values[key]
++                property = copy
++            end
++            kept[key] = property
 +        end
-+        if visible then kept[key] = property end
-+    end
-+    if type(kept["language"]) == "table" then
-+        kept["language"].value = language
 +    end
 +    return kept
 +end
 +
- function M.properties(entry, ctx)
++return M
+diff --git a/waywallen/plugins/org.waywallen.open-wallpaper-engine/wallpaper_engine/wallpaper.lua b/waywallen/plugins/org.waywallen.open-wallpaper-engine/wallpaper_engine/wallpaper.lua
+index 1ec135a..ce85ea2 100644
+--- a/waywallen/plugins/org.waywallen.open-wallpaper-engine/wallpaper_engine/wallpaper.lua
++++ b/waywallen/plugins/org.waywallen.open-wallpaper-engine/wallpaper_engine/wallpaper.lua
+@@ -1,4 +1,5 @@
+ local project_util = import("wallpaper_engine.project")
++local language = import("wallpaper_engine.language")
+ 
+ local M = {}
+ 
+@@ -206,6 +207,7 @@ function M.properties(entry, ctx)
      local props = load_project_properties(entry, ctx)
      if not props then return nil end
      map_property_keys(props)
-+    props = apply_conditions(props, ctx)
++    props = language.filter(props, ctx)
  
      local locale, locale_fallback = load_locale(ctx, entry.library_root)
      if locale or locale_fallback then
-@@ -266,6 +407,13 @@
+@@ -266,6 +268,11 @@ function M.apply(entry, ctx)
          end
      end
      if entry.wp_type == "scene" then
-+        local scene_props = load_project_properties(entry, ctx)
-+        if scene_props then
-+            local language = preferred_language(scene_props, ctx)
-+            if language then
-+                default_user_properties["language"] = language
-+            end
++        local props = load_project_properties(entry, ctx)
++        local selected = props and language.preferred_value(props, ctx) or nil
++        if selected then
++            default_user_properties["language"] = tostring(selected)
 +        end
          local assets
          if entry.library_root and entry.library_root ~= "" then
              local candidate = entry.library_root .. project_util.ASSETS_REL
+-- 
+2.56.1
+
